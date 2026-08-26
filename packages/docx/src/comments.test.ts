@@ -226,6 +226,60 @@ describe('comment data projections', () => {
     }]);
   });
 
+  it('withholds a cross-paragraph fallback past a truncated layout cut', () => {
+    // A paragraph beyond a progressive prefix has no projected text for exactly
+    // the same reason deleted content has none, so the index alone cannot tell
+    // the two apart. Guessing a fallback parks every not-yet-paginated comment
+    // on the prefix's last page — beside page 1 — for the whole load.
+    const paragraphs = [
+      { paragraph: para(['visible']), source: source([0]) },
+      {
+        paragraph: para(['not paginated yet'], [mark('4', 'reference', 1)]),
+        source: source([5]),
+      },
+    ];
+    const rendered = [{
+      source: source([0]), sourceRunIndex: 0, text: 'visible',
+    }] as unknown as DocxTextRunInfo[];
+
+    expect(collectStoryCommentRanges(paragraphs, valid('4'), rendered))
+      .toEqual([expect.objectContaining({
+        geometryFallback: { source: source([0]), sourceRunIndex: 0 },
+      })]);
+    expect(collectStoryCommentRanges(paragraphs, valid('4'), rendered, { truncated: true }))
+      .toEqual([{
+        commentId: '4',
+        source: source([5]),
+        startRunIndex: 1,
+        endRunIndex: 1,
+        reference: reference([5], 1, 'preceding'),
+      }]);
+  });
+
+  it('keeps the deleted-content fallback for a paragraph inside the prefix', () => {
+    // The truncation rule is positional, not a blanket suppression: a paragraph
+    // at or before the cut that projects no text really has no final-state
+    // geometry, so §17.13.4 comments on deleted content still anchor.
+    const deleted = {
+      type: 'paragraph',
+      runs: [{ type: 'text', text: 'gone', revision: { kind: 'deletion' } }],
+      commentMarks: [mark('4', 'reference', 1)],
+    } as unknown as DocParagraph;
+    const paragraphs = [
+      { paragraph: deleted, source: source([0]) },
+      { paragraph: para(['visible']), source: source([1]) },
+      { paragraph: para(['not paginated yet']), source: source([2]) },
+    ];
+    const rendered = [{
+      source: source([1]), sourceRunIndex: 0, text: 'visible',
+    }] as unknown as DocxTextRunInfo[];
+
+    expect(collectStoryCommentRanges(paragraphs, valid('4'), rendered, { truncated: true }))
+      .toEqual([expect.objectContaining({
+        geometryFallback: { source: source([1]), sourceRunIndex: 0 },
+      })]);
+  });
+
   it('derives cross-paragraph fallback from actual layout geometry, not field kind', () => {
     const deleted = {
       type: 'paragraph',

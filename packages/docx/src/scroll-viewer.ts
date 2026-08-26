@@ -631,9 +631,7 @@ export class DocxScrollViewer implements ZoomableViewer {
         // for an exact publication they are provably final already.
         onLayoutPartial: ({ exact }) => {
           if (this._destroyed || generation !== this._loadGeneration) return;
-          this._find.invalidate();
-          if (!exact) this._invalidateRenderedSlots();
-          this.relayout();
+          this._onLayoutPublication(exact);
         },
         // Relaying out when the authoritative layout lands is what turns a
         // provisional prefix into the real document on screen: page count grows,
@@ -646,9 +644,7 @@ export class DocxScrollViewer implements ZoomableViewer {
             this._opts.onError?.(error instanceof Error ? error : new Error(String(error)));
             return;
           }
-          this._find.invalidate();
-          this._invalidateRenderedSlots();
-          this.relayout();
+          this._onLayoutPublication(false);
         },
       }), (ownedDocument) => {
         this._invalidateElementContext(false);
@@ -2121,6 +2117,23 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._mountVisible();
   }
 
+  /**
+   * The viewer's response to a progressive layout publication — a preview, or
+   * the authoritative layout replacing one.
+   *
+   * A publication renumbers the document's pages, so everything keyed on a page
+   * index belongs to the layout being replaced: find results, the painted
+   * slots, and the comment page/run indexes. Leaving the last of these in place
+   * kept `goToComment` steering to whichever page the comment occupied in the
+   * provisional prefix, for the rest of the session.
+   */
+  private _onLayoutPublication(exact: boolean): void {
+    this._find.invalidate();
+    this._resetCommentNavigation();
+    if (!exact) this._invalidateRenderedSlots();
+    this.relayout();
+  }
+
   private _resetCommentNavigation(): void {
     this._commentNavigationGeneration++;
     this._commentPageById.clear();
@@ -2195,6 +2208,9 @@ export class DocxScrollViewer implements ZoomableViewer {
    * the first anchored text run into view, and selects the thread.
    *
    * Returns `false` for an unknown id or a comment with no rendered anchor.
+   * Under {@link DocxScrollViewerOptions.progressiveLayout}, a navigation still
+   * in flight when more pages are published also resolves `false`: the pages it
+   * was scanning have been renumbered. Retry after {@link whenLayoutComplete}.
    */
   async goToComment(
     commentId: string,

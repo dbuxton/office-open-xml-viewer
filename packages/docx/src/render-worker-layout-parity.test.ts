@@ -193,8 +193,7 @@ describe('render worker canonical layout parity', () => {
     const main = Object.create(DocxDocument.prototype) as DocxDocument;
     Object.assign(main, {
       _mode: 'main', _document: model, _source: source, _meta: null,
-      _commentAnchorRanges: null,
-      _revisionAnchorRanges: null,
+      _reviewAnchors: null,
     });
     attachDocumentLayoutRuntime(main, 0);
     const layoutServices = createLayoutServices(model, { measureContext: measureContext() });

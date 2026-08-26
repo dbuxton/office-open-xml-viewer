@@ -62,6 +62,12 @@ export interface SyntheticDocumentOptions {
    *  cut. Applied to paragraph-bodied shapes (`plain`, `header-footer`,
    *  `fields`); ignored for `tables`. */
   readonly keepNextIndices?: readonly number[];
+  /** 0-based body-paragraph indices to annotate with a §17.13.4 comment range.
+   *  Each gets `commentMarks` and a matching entry in the model's `comments`,
+   *  so a progressive prefix that stops short of the paragraph can be observed
+   *  to publish no geometry for it. Applied to paragraph-bodied shapes;
+   *  ignored for `tables`. */
+  readonly commentedParagraphIndices?: readonly number[];
   /** Body paragraph count (or table count for `tables`). */
   readonly paragraphs?: number;
   /** Words per generated paragraph. `long-paragraphs` overrides this upward. */
@@ -171,10 +177,12 @@ function textParagraph(text: string, over: Partial<DocParagraph> = {}): DocParag
 
 /** A run marked as deleted (ECMA-376 §17.13.5.14 `w:del`). Hidden by the
  *  final-view default; shown struck through in the markup view. */
-function deletedRun(text: string): DocParagraph['runs'][number] {
+function deletedRun(text: string, id: string): DocParagraph['runs'][number] {
   return {
     ...(textRun(text) as Record<string, unknown>),
-    revision: { kind: 'deletion', author: 'Reviewer A', date: '2024-01-01T00:00:00Z' },
+    // §17.13.5.14 `w:id` is ST_DecimalNumber and is the normative identity the
+    // anchor projection joins on; without it the run is unresolvable.
+    revision: { kind: 'deletion', id, author: 'Reviewer A', date: '2024-01-01T00:00:00Z' },
   } as DocParagraph['runs'][number];
 }
 
@@ -191,7 +199,7 @@ function trackedParagraph(next: () => number, words: number, index: number): Doc
   if (index % 2 === 1) return textParagraph(sentence(next, words));
   return paragraph([
     textRun(`${sentence(next, Math.max(1, Math.round(words / 2)))} `),
-    deletedRun(sentence(next, Math.max(1, Math.round(words / 2)))),
+    deletedRun(sentence(next, Math.max(1, Math.round(words / 2))), String(index)),
   ]);
 }
 
@@ -294,6 +302,44 @@ export function syntheticDocxModel(
     );
   }
 
+  // One §17.13.5 record per deleted run `trackedParagraph` emitted, so the
+  // revision anchor projection has a valid id to resolve against.
+  const revisions = shape === 'tracked' || shape === 'tracked-fields'
+    ? body.flatMap((_element, index) => (index % 2 === 0
+      ? [{
+          kind: 'deletion',
+          id: String(index),
+          author: 'Reviewer A',
+          date: '2024-01-01T00:00:00Z',
+          text: '',
+        }]
+      : []))
+    : [];
+
+  // §17.13.4.1/.2/.4 — one range per requested paragraph, anchored over its
+  // single run so the comment has real covered geometry once that paragraph is
+  // laid out (and none at all before then).
+  const commented = options.commentedParagraphIndices ?? [];
+  const comments = commented.map((index) => ({
+    // §17.13.4.1 `w:id` is ST_DecimalNumber; a non-decimal id is unresolvable.
+    id: String(index),
+    author: 'Reviewer A',
+    date: '2024-01-01T00:00:00Z',
+    text: `Comment on paragraph ${index}`,
+  }));
+  for (const index of commented) {
+    const target = body[index];
+    if (target?.type !== 'paragraph') continue;
+    body[index] = {
+      ...target,
+      commentMarks: [
+        { id: String(index), kind: 'rangeStart', runIndex: 0 },
+        { id: String(index), kind: 'rangeEnd', runIndex: target.runs.length },
+        { id: String(index), kind: 'reference', runIndex: target.runs.length },
+      ],
+    };
+  }
+
   const headers: DocxDocumentModel['headers'] = { default: null, first: null, even: null };
   const footers: DocxDocumentModel['footers'] = { default: null, first: null, even: null };
   if (shape === 'header-footer') {
@@ -316,6 +362,8 @@ export function syntheticDocxModel(
     footers,
     fontFamilyClasses: { 'Times New Roman': 'roman' },
     footnotes: [],
+    comments,
+    revisions,
   } as unknown as DocxDocumentModel;
 }
 

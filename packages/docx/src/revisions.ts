@@ -1,6 +1,7 @@
 import type { LayoutSourceStore } from './layout/layout-source-store.js';
 import { sourceKey } from './layout/source-key.js';
 import type { SourceRef } from './layout/types.js';
+import type { ReviewAnchorProjectionOptions } from './comments.js';
 import { decimalReviewIdKey } from './review-id.js';
 import type { DocRevision, DocxStorySource, DocxTextRunInfo } from './types.js';
 
@@ -70,9 +71,15 @@ interface ParagraphGeometryFallbacks {
   readonly preceding: readonly (RevisionAnchorGeometryFallback | undefined)[];
 }
 
+/** `following[i]` / `preceding[i]` are the nearest projected runs strictly
+ *  after / before paragraph `i`. Under a TRUNCATED layout nothing is projected
+ *  past the pagination cut, so `following` is already empty there; `preceding`
+ *  has to be suppressed explicitly, or every not-yet-paginated revision would
+ *  anchor to the last run of the prefix — beside its opening pages. */
 function paragraphGeometryFallbacks(
   paragraphs: readonly RevisionParagraph[],
   renderedRunIndex: SortedRenderedRunIndex,
+  truncated: boolean,
 ): ParagraphGeometryFallbacks {
   const following: (RevisionAnchorGeometryFallback | undefined)[] = new Array(paragraphs.length);
   let next: RevisionAnchorGeometryFallback | undefined;
@@ -85,10 +92,19 @@ function paragraphGeometryFallbacks(
     }
   }
 
+  let lastProjected = -1;
+  if (truncated) {
+    for (let index = 0; index < paragraphs.length; index += 1) {
+      if (renderedRunIndex.get(sourceKey(paragraphs[index]!.source)) !== undefined) {
+        lastProjected = index;
+      }
+    }
+  }
+
   const preceding: (RevisionAnchorGeometryFallback | undefined)[] = new Array(paragraphs.length);
   let previous: RevisionAnchorGeometryFallback | undefined;
   for (let index = 0; index < paragraphs.length; index += 1) {
-    preceding[index] = previous;
+    preceding[index] = truncated && index > lastProjected ? undefined : previous;
     const paragraph = paragraphs[index]!;
     const runs = renderedRunIndex.get(sourceKey(paragraph.source));
     const last = runs?.at(-1);
@@ -132,6 +148,7 @@ export function collectLayoutSourceRevisionRanges(
   revisions: readonly Readonly<DocRevision>[],
   source: LayoutSourceStore,
   renderedRunIndex: RenderedRunIndex = new Map(),
+  options: ReviewAnchorProjectionOptions = {},
 ): RevisionAnchorRange[] {
   const revisionIndexByKey = new Map<string, number>();
   const ambiguousKeys = new Set<string>();
@@ -157,7 +174,11 @@ export function collectLayoutSourceRevisionRanges(
       Object.freeze([...indices].sort((left, right) => left - right)),
     ]),
   );
-  const paragraphFallbacks = paragraphGeometryFallbacks(paragraphs, sortedRenderedRunIndex);
+  const paragraphFallbacks = paragraphGeometryFallbacks(
+    paragraphs,
+    sortedRenderedRunIndex,
+    options.truncated === true,
+  );
   const ranges: RevisionAnchorRange[] = [];
   for (const [paragraphIndex, paragraph] of paragraphs.entries()) {
     let runIndex = 0;
@@ -208,9 +229,10 @@ export function collectLayoutSourceRevisionRangesIfPresent(
   revisions: readonly Readonly<DocRevision>[] | undefined,
   source: LayoutSourceStore,
   renderedRunIndex: RenderedRunIndex = new Map(),
+  options: ReviewAnchorProjectionOptions = {},
 ): RevisionAnchorRange[] {
   if ((revisions?.length ?? 0) === 0) return [];
-  return collectLayoutSourceRevisionRanges(revisions ?? [], source, renderedRunIndex);
+  return collectLayoutSourceRevisionRanges(revisions ?? [], source, renderedRunIndex, options);
 }
 
 /** Join one revision range to projected final-state text. Insertions and move

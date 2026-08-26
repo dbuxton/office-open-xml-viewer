@@ -57,6 +57,34 @@ describe('revision anchor projection', () => {
     expect(resolveRevisionAnchorRuns(ranges[1]!, rendered).map((run) => run.text)).toEqual(['new']);
   });
 
+  it('withholds a cross-paragraph fallback past a truncated layout cut', () => {
+    // Same rule as the comment projection: under a progressive prefix, absent
+    // geometry past the cut means "not paginated yet", so anchoring a later
+    // deletion to the prefix's last run would park it beside page 1.
+    const first: SourceRef = { story: 'body', storyInstance: 'body', path: [0] };
+    const late: SourceRef = { story: 'body', storyInstance: 'body', path: [1] };
+    const source = {
+      blocks: {
+        sources: [first, late],
+        resolve: (ref: SourceRef) => ({
+          type: 'paragraph',
+          runs: ref === first
+            ? [{ type: 'text', text: 'laid out' }]
+            : [{ type: 'text', text: 'gone', revision: { kind: 'deletion', id: '7' } }],
+        }),
+      },
+    } as unknown as LayoutSourceStore;
+    const revisions = [{ kind: 'deletion' as const, id: '7', text: 'gone' }];
+    const rendered = new Map([[sourceKey(first), new Set([0])]]);
+
+    expect(collectLayoutSourceRevisionRanges(revisions, source, rendered))
+      .toEqual([expect.objectContaining({
+        geometryFallback: { source: first, sourceRunIndex: 0 },
+      })]);
+    expect(collectLayoutSourceRevisionRanges(revisions, source, rendered, { truncated: true }))
+      .toEqual([{ revisionIndex: 0, source: late, startRunIndex: 0, endRunIndex: 1 }]);
+  });
+
   it('does not guess anchors for missing, invalid, or duplicate decimal ids', () => {
     const source = sourceWithRuns([
       { type: 'text', text: 'a', revision: { kind: 'deletion' } },

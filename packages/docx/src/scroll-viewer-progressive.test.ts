@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DocxScrollViewer } from './scroll-viewer.js';
+import type { CommentAnchorRange } from './comments.js';
 import {
   FakeDocxEngine,
   installDom,
   makeContainer,
   type FakeEl,
 } from './scroll-viewer-test-dom.js';
+import type { DocxTextRunInfo } from './types.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Progressive layout hands the viewer a document whose page count GROWS: it
@@ -226,6 +228,94 @@ describe('DocxScrollViewer — growing page count', () => {
     // worth of slots, not 400.
     expect(canvases.length).toBeGreaterThan(0);
     expect(canvases.length).toBeLessThan(10);
+    viewer.destroy();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A publication renumbers the document's pages, so everything the viewer keyed
+// on a page index — the comment→page map, the retained per-page run geometry,
+// and any navigation still scanning them — belongs to the layout that is being
+// replaced. Left in place, `goToComment` kept steering to a page the comment
+// had only ever occupied in the provisional prefix.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const COMMENT_SOURCE = { story: 'body', storyInstance: 'body', path: [7] } as const;
+
+function anchoredRun(): DocxTextRunInfo {
+  return {
+    text: 'annotated', source: COMMENT_SOURCE, sourceRunIndex: 0,
+    x: 20, y: 200, w: 80, h: 14, fontSize: 12, font: '12px sans-serif',
+  };
+}
+
+function commentedEngine(pages: number): FakeDocxEngine {
+  const engine = new FakeDocxEngine(pages, PAGE);
+  engine.comments = [{ id: 'c', author: 'Ada', text: 'Anchored late' }];
+  engine.commentAnchors = [{
+    commentId: 'c',
+    source: COMMENT_SOURCE,
+    startRunIndex: 0,
+    endRunIndex: 1,
+    reference: { source: COMMENT_SOURCE, runIndex: 1, affinity: 'preceding' },
+  }] as CommentAnchorRange[];
+  return engine;
+}
+
+/** The viewer's own response to a progressive publication, as `load()` wires
+ *  it — unreachable through `fromDocument`, which borrows a loaded document. */
+function publish(viewer: ReturnType<typeof DocxScrollViewer.fromDocument>): void {
+  (viewer as unknown as { _onLayoutPublication(exact: boolean): void })
+    ._onLayoutPublication(false);
+}
+
+describe('DocxScrollViewer — comment navigation across a publication', () => {
+  it('re-scans comment pages once the authoritative layout lands', async () => {
+    installDom();
+    const engine = commentedEngine(3);
+    // In the prefix the anchored run is projected on page 1.
+    engine.collectPageRuns = vi.fn(async (page: number) => (
+      page === 1 ? [anchoredRun()] : []));
+    const viewer = DocxScrollViewer.fromDocument(
+      makeContainer() as unknown as HTMLElement,
+      engine.asDoc(),
+    );
+
+    await expect(viewer.goToComment('c')).resolves.toBe(true);
+    expect(viewer.getSelectionContext()).toMatchObject({ commentId: 'c', pageIndex: 1 });
+
+    // The authoritative layout puts the same paragraph much further down.
+    engine.setPageCount(60);
+    engine.collectPageRuns = vi.fn(async (page: number) => (
+      page === 41 ? [anchoredRun()] : []));
+    publish(viewer);
+
+    await expect(viewer.goToComment('c')).resolves.toBe(true);
+    expect(viewer.getSelectionContext()).toMatchObject({ commentId: 'c', pageIndex: 41 });
+    viewer.destroy();
+  });
+
+  it('abandons a navigation the publication renumbered under it', async () => {
+    installDom();
+    const engine = commentedEngine(3);
+    let resolveFirstPage!: (runs: DocxTextRunInfo[]) => void;
+    const firstPage = new Promise<DocxTextRunInfo[]>((resolve) => {
+      resolveFirstPage = resolve;
+    });
+    engine.collectPageRuns = vi.fn((page: number) => (
+      page === 0 ? firstPage : Promise.resolve([anchoredRun()])));
+    const viewer = DocxScrollViewer.fromDocument(
+      makeContainer() as unknown as HTMLElement,
+      engine.asDoc(),
+    );
+
+    const inFlight = viewer.goToComment('c');
+    await Promise.resolve();
+    publish(viewer);
+    resolveFirstPage([]);
+
+    // Its scan described pages the new layout has renumbered; the caller retries.
+    await expect(inFlight).resolves.toBe(false);
     viewer.destroy();
   });
 });

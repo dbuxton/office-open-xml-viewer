@@ -4,6 +4,17 @@ import type { SourceRef } from './layout/types.js';
 import { decimalReviewIdKey } from './review-id.js';
 import type { DocComment, DocxCommentMark, DocxStorySource, DocxTextRunInfo } from './types.js';
 
+/** Shared by the comment and revision anchor projections. */
+export interface ReviewAnchorProjectionOptions {
+  /**
+   * The rendered-run index describes a TRUNCATED layout — a progressive
+   * prefix — rather than the whole document. Past the prefix's cut, absent
+   * geometry means "not paginated yet", not "this content has no final-state
+   * geometry", so no cross-paragraph fallback may be published there.
+   */
+  readonly truncated?: boolean;
+}
+
 export interface CommentAnchorRange {
   readonly commentId: string;
   /** Exact story/path identity used by `DocxTextRunInfo.source`. */
@@ -157,12 +168,16 @@ function renderedTextLocations(
   return {
     locations,
     paragraphIndices: new Set(locations.map(({ paragraphIndex }) => paragraphIndex)),
+    lastParagraphIndex: locations.at(-1)?.paragraphIndex ?? -1,
   };
 }
 
 interface ProjectedTextIndex {
   readonly locations: readonly MarkLocation[];
   readonly paragraphIndices: ReadonlySet<number>;
+  /** Highest paragraph index in this story with projected text, or -1. Under a
+   *  truncated layout this is the pagination cut. */
+  readonly lastParagraphIndex: number;
 }
 
 function compareMarkLocations(left: MarkLocation, right: MarkLocation): number {
@@ -189,11 +204,19 @@ export function lowerBoundProjectedTextLocation(
 function nearestProjectedText(
   reference: MarkLocation,
   index: ProjectedTextIndex,
+  truncated: boolean,
 ): MarkLocation | undefined {
   // Same-paragraph gaps are resolved from the authored reference boundary by
   // the consumer helper below. Publish a cross-paragraph fallback only when
   // the entire paragraph has no final-state text geometry.
   if (index.paragraphIndices.has(reference.paragraphIndex)) return undefined;
+  // A TRUNCATED (progressive-prefix) layout stops projecting text at its cut,
+  // which is not the same fact as "this paragraph has no final-state text".
+  // Anchoring past the cut to the nearest run inside the prefix would park
+  // every not-yet-paginated comment beside the opening pages for the whole of
+  // a progressive load. Paragraphs at or before the cut are unaffected, so a
+  // comment on deleted content still gets its adjacent-paragraph fallback.
+  if (truncated && reference.paragraphIndex > index.lastParagraphIndex) return undefined;
   const followingIndex = lowerBoundProjectedTextLocation(index.locations, reference);
   const following = index.locations[followingIndex];
   const preceding = followingIndex > 0 ? index.locations[followingIndex - 1] : undefined;
@@ -209,11 +232,13 @@ export function collectStoryCommentRanges(
   paragraphs: readonly ParagraphVisit[],
   validCommentIds: ReadonlySet<string>,
   renderedRuns: readonly Readonly<DocxTextRunInfo>[] = [],
+  options: ReviewAnchorProjectionOptions = {},
 ): CommentAnchorRange[] {
   return collectIndexedStoryCommentRanges(
     paragraphs,
     validCommentIds,
     indexRenderedRuns(renderedRuns),
+    options.truncated === true,
   );
 }
 
@@ -221,6 +246,7 @@ function collectIndexedStoryCommentRanges(
   paragraphs: readonly ParagraphVisit[],
   validCommentIds: ReadonlySet<string>,
   renderedRunIndex: RenderedRunIndex,
+  truncated: boolean,
 ): CommentAnchorRange[] {
   const validByValue = new Map<string, string>();
   const ambiguousValues = new Set<string>();
@@ -275,7 +301,11 @@ function collectIndexedStoryCommentRanges(
     if (orderedPair) {
       const fallbackOrigin = start.paragraphIndex === end.paragraphIndex
         && start.boundary === end.boundary ? start : reference;
-      const geometryFallback = nearestProjectedText(fallbackOrigin, projectedTextIndex);
+      const geometryFallback = nearestProjectedText(
+        fallbackOrigin,
+        projectedTextIndex,
+        truncated,
+      );
       for (let index = start.paragraphIndex; index <= end.paragraphIndex; index += 1) {
         const visit = paragraphs[index]!;
         const from = index === start.paragraphIndex ? start.boundary : 0;
@@ -298,7 +328,7 @@ function collectIndexedStoryCommentRanges(
     // A reversed start/end pair is not a lone boundary.
     if (start && end) continue;
     const point = loneBoundary ?? reference;
-    const geometryFallback = nearestProjectedText(point, projectedTextIndex);
+    const geometryFallback = nearestProjectedText(point, projectedTextIndex, truncated);
     ranges.push(frozenRange(id, point, reference, geometryFallback));
   }
   return ranges;
@@ -310,6 +340,7 @@ export function collectLayoutSourceCommentRanges(
   comments: readonly Readonly<{ id: string }>[],
   source: LayoutSourceStore,
   renderedRunIndex: RenderedRunIndex = new Map(),
+  options: ReviewAnchorProjectionOptions = {},
 ): CommentAnchorRange[] {
   const validCommentIds = new Set(comments.map(({ id }) => id));
   const byStory = new Map<string, ParagraphVisit[]>();
@@ -322,7 +353,12 @@ export function collectLayoutSourceCommentRanges(
     visits.push({ paragraph: block, source: blockSource });
   }
   return [...byStory.values()].flatMap((paragraphs) =>
-    collectIndexedStoryCommentRanges(paragraphs, validCommentIds, renderedRunIndex));
+    collectIndexedStoryCommentRanges(
+      paragraphs,
+      validCommentIds,
+      renderedRunIndex,
+      options.truncated === true,
+    ));
 }
 
 /** Avoid any story walk for the common comment-free document. */
@@ -330,9 +366,10 @@ export function collectLayoutSourceCommentRangesIfPresent(
   comments: readonly Readonly<{ id: string }>[] | undefined,
   source: LayoutSourceStore,
   renderedRunIndex: RenderedRunIndex = new Map(),
+  options: ReviewAnchorProjectionOptions = {},
 ): CommentAnchorRange[] {
   if ((comments?.length ?? 0) === 0) return [];
-  return collectLayoutSourceCommentRanges(comments ?? [], source, renderedRunIndex);
+  return collectLayoutSourceCommentRanges(comments ?? [], source, renderedRunIndex, options);
 }
 
 function sameStorySource(

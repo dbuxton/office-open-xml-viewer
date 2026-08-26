@@ -65,14 +65,14 @@ import {
 } from './element-context.js';
 import type { DocxElementContext, DocxPagePoint } from './selection-context.js';
 import {
-  collectLayoutSourceCommentRangesIfPresent,
+  collectLayoutSourceCommentRanges,
   resolveDocxCommentThreads,
   type CommentAnchorRange,
   type ResolvedDocxCommentThread,
   type ResolveDocxCommentThreadsOptions,
 } from './comments.js';
 import {
-  collectLayoutSourceRevisionRangesIfPresent,
+  collectLayoutSourceRevisionRanges,
   type RevisionAnchorRange,
 } from './revisions.js';
 import {
@@ -218,6 +218,12 @@ interface ReviewSnapshot {
   readonly revisions: readonly Readonly<DocRevision>[];
 }
 
+/** One stable identity for the empty projections. `DocxScrollViewer` compares
+ *  `commentAnchorRanges()` by ARRAY IDENTITY to decide whether to rebuild its
+ *  anchor-id set, so a fresh `[]` per call would rebuild it on every read. */
+const EMPTY_COMMENT_ANCHOR_RANGES: readonly CommentAnchorRange[] = Object.freeze([]);
+const EMPTY_REVISION_ANCHOR_RANGES: readonly RevisionAnchorRange[] = Object.freeze([]);
+
 const EMPTY_REVIEW_SNAPSHOT: ReviewSnapshot = Object.freeze({
   comments: Object.freeze([]),
   revisions: Object.freeze([]),
@@ -254,15 +260,29 @@ export class DocxDocument {
    *  pages (main) or the worker meta's `bookmarkPages` (worker). Nulled by
    *  {@link destroy} so a reused reference never serves a stale document. */
   private _bookmarkPages: Map<string, number> | null = null;
-  /** Lazily-computed §17.13.4 comment anchor ranges (main mode; worker mode
-   *  reads them from the meta). Nulled by {@link destroy} with the other
-   *  per-document caches. */
-  private _commentAnchorRanges: readonly CommentAnchorRange[] | null = null;
-  /** Lazily-computed §17.13.5 revision source ranges (main mode; worker mode
-   * reads them from metadata). */
-  private _revisionAnchorRanges: readonly RevisionAnchorRange[] | null = null;
-  /** Shared lightweight index for comment and revision anchor projections. */
-  private _reviewTextRunSourceIndex: ReadonlyMap<string, ReadonlySet<number>> | null = null;
+  /**
+   * Lazily-computed §17.13.4 comment and §17.13.5 revision anchor projections
+   * (main mode; worker mode reads them from the meta), together with the
+   * layout they were projected from.
+   *
+   * Keyed on the layout OBJECT, not on the variant's options: progressive
+   * layout replaces the layout under one options key — a provisional prefix,
+   * then longer prefixes, then the authoritative document — so a projection
+   * memoised by options alone outlived the geometry it described. Every
+   * comment past the prefix then kept a `geometryFallback` pointing INSIDE the
+   * prefix, i.e. beside page 1, for the document's whole life. Comparing
+   * identity makes the cache unable to outlive its layout, here and across
+   * {@link setLayoutView}. `truncated` is part of the key because the same
+   * layout object is projected differently while the document is still
+   * provisional. Nulled by {@link destroy} with the other per-document caches.
+   */
+  private _reviewAnchors: {
+    readonly layout: DeepReadonly<DocumentLayout>;
+    readonly truncated: boolean;
+    readonly textRunSourceIndex: ReadonlyMap<string, ReadonlySet<number>>;
+    comments: readonly CommentAnchorRange[] | null;
+    revisions: readonly RevisionAnchorRange[] | null;
+  } | null = null;
   private _mode: 'main' | 'worker' = 'main';
   private _threeD: ChartThreeDRenderer | undefined;
   private _regionMap: ChartRegionMapRenderer | undefined;
@@ -504,6 +524,11 @@ export class DocxDocument {
           const progressiveDocument = doc;
           const abort = new AbortController();
           progressiveDocument._layoutAbort = abort;
+          // Set BEFORE the first publication, not from inside it: everything
+          // derived from a prefix — the review anchor projections above all —
+          // has to know the layout it is reading is provisional for the whole
+          // window in which a prefix can be observed.
+          progressiveDocument._layoutComplete = false;
           let published = false;
           const full = layoutDocumentProgressively(
             doc._source.bodyLayoutInput,
@@ -514,6 +539,9 @@ export class DocxDocument {
               scheduler: { ...scheduler, signal: abort.signal },
               onPreview: (preview) => {
                 store.prime(layoutOptions, preview.layout, published);
+                // The prefix's bookmark map describes a short document. The
+                // review anchor caches are keyed on the layout object, so the
+                // new publication invalidates them on its own.
                 progressiveDocument._bookmarkPages = null;
                 if (published) {
                   // A later step of the chain: more pages are now available.
@@ -522,7 +550,6 @@ export class DocxDocument {
                     exact: preview.exact,
                   });
                 } else {
-                  progressiveDocument._layoutComplete = false;
                   published = true;
                 }
               },
@@ -657,9 +684,7 @@ export class DocxDocument {
     this._review = EMPTY_REVIEW_SNAPSHOT;
     documentLayoutRuntimeOf(this).services = null;
     this._bookmarkPages = null;
-    this._commentAnchorRanges = null;
-    this._revisionAnchorRanges = null;
-    this._reviewTextRunSourceIndex = null;
+    this._reviewAnchors = null;
     this._rawParts.clear();
     // Release the embedded fonts this document added to the shared FontFaceSet
     // (main mode). Refcounted in core: a font also used by another open document
@@ -845,10 +870,61 @@ export class DocxDocument {
    * boxes. Join it to rendered geometry with `sourceRunIndex`. Mode-agnostic:
    * main mode resolves lazily from the retained source; worker mode returns the
    * same projection in metadata. Returns `[]` when no anchors exist.
+   *
+   * The projection describes the layout currently in view. While
+   * {@link layoutComplete} is `false` that is a provisional prefix, so an
+   * anchor whose content has not been paginated yet carries no geometry
+   * fallback: it resolves against no page rather than borrowing a position
+   * inside the prefix. Await {@link whenLayoutComplete} — or re-read after each
+   * `onLayoutPartial` — for the whole document's anchors; a retained array is a
+   * snapshot of the layout it was read from.
    */
   commentAnchorRanges(): readonly CommentAnchorRange[] {
-    if (this._meta) return this._meta.commentAnchorRanges ?? [];
-    if (!this._document || !this._source) return [];
+    if (this._meta) return this._meta.commentAnchorRanges ?? EMPTY_COMMENT_ANCHOR_RANGES;
+    if (!this._document || !this._source) return EMPTY_COMMENT_ANCHOR_RANGES;
+    // Checked before the layout is touched: a comment-free document must not
+    // pay for a document-wide text index, once per publication.
+    const comments = this._reviewSnapshot().comments;
+    if (comments.length === 0) return EMPTY_COMMENT_ANCHOR_RANGES;
+    const cache = this._reviewAnchorCache();
+    cache.comments ??= collectLayoutSourceCommentRanges(
+      comments,
+      this._source,
+      cache.textRunSourceIndex,
+      { truncated: cache.truncated },
+    );
+    return cache.comments;
+  }
+
+  /** ECMA-376 §17.13.5 revision containers resolved to normalized source-run
+   * intervals. Join them to `collectPageRuns()` with
+   * `resolveRevisionAnchorRuns()`. Deletions and move sources use the nearest
+   * deterministic final-state text position because accepted rendering gives
+   * their own content no geometry. Mode-agnostic. */
+  revisionAnchorRanges(): readonly RevisionAnchorRange[] {
+    if (this._meta) return this._meta.revisionAnchorRanges ?? EMPTY_REVISION_ANCHOR_RANGES;
+    if (!this._document || !this._source) return EMPTY_REVISION_ANCHOR_RANGES;
+    const revisions = this._reviewSnapshot().revisions;
+    if (revisions.length === 0) return EMPTY_REVISION_ANCHOR_RANGES;
+    const cache = this._reviewAnchorCache();
+    cache.revisions ??= collectLayoutSourceRevisionRanges(
+      revisions,
+      this._source,
+      cache.textRunSourceIndex,
+      { truncated: cache.truncated },
+    );
+    return cache.revisions;
+  }
+
+  /**
+   * The review-anchor projections for the layout currently being viewed,
+   * rebuilt whenever that layout object — or the document's provisional
+   * status — changes.
+   *
+   * `Object.create`-based focused tests bypass field initializers, so this
+   * must never assume `_reviewAnchors` is `null` rather than `undefined`.
+   */
+  private _reviewAnchorCache(): NonNullable<DocxDocument['_reviewAnchors']> {
     const runtime = documentLayoutRuntimeOf(this);
     const services = runtime.services;
     if (!services) throw new Error('Document layout services are not initialized');
@@ -860,38 +936,18 @@ export class DocxDocument {
     if (!store) throw new Error('Document layout variant store is not initialized');
     const active = runtime.activeLayoutOptions;
     const layout = active ? store.layoutFor(active) : store.defaultLayout;
-    this._reviewTextRunSourceIndex ??= textRunSourceIndexForDocument(layout);
-    this._commentAnchorRanges ??= collectLayoutSourceCommentRangesIfPresent(
-      this._reviewSnapshot().comments,
-      this._source,
-      this._reviewTextRunSourceIndex,
-    );
-    return this._commentAnchorRanges;
-  }
-
-  /** ECMA-376 §17.13.5 revision containers resolved to normalized source-run
-   * intervals. Join them to `collectPageRuns()` with
-   * `resolveRevisionAnchorRuns()`. Deletions and move sources use the nearest
-   * deterministic final-state text position because accepted rendering gives
-   * their own content no geometry. Mode-agnostic. */
-  revisionAnchorRanges(): readonly RevisionAnchorRange[] {
-    if (this._meta) return this._meta.revisionAnchorRanges ?? [];
-    if (!this._document || !this._source) return [];
-    const runtime = documentLayoutRuntimeOf(this);
-    const services = runtime.services;
-    if (!services) throw new Error('Document layout services are not initialized');
-    // Same active-variant selection as commentAnchorRanges above.
-    const store = layoutVariantStoreOf(services);
-    if (!store) throw new Error('Document layout variant store is not initialized');
-    const active = runtime.activeLayoutOptions;
-    const layout = active ? store.layoutFor(active) : store.defaultLayout;
-    this._reviewTextRunSourceIndex ??= textRunSourceIndexForDocument(layout);
-    this._revisionAnchorRanges ??= collectLayoutSourceRevisionRangesIfPresent(
-      this._reviewSnapshot().revisions,
-      this._source,
-      this._reviewTextRunSourceIndex,
-    );
-    return this._revisionAnchorRanges;
+    const truncated = !this._layoutComplete;
+    const cached = this._reviewAnchors;
+    if (cached && cached.layout === layout && cached.truncated === truncated) return cached;
+    const rebuilt = {
+      layout,
+      truncated,
+      textRunSourceIndex: textRunSourceIndexForDocument(layout),
+      comments: null,
+      revisions: null,
+    };
+    this._reviewAnchors = rebuilt;
+    return rebuilt;
   }
 
   /** Object.create-based focused tests and older deserialized instances can
@@ -963,12 +1019,11 @@ export class DocxDocument {
       runtime.defaultCurrentDateMs,
       view.showTrackedChanges === true,
     );
-    // Bookmark pages and the review anchor caches are derived from the
-    // layout, so they belong to the variant that produced them.
+    // Bookmark pages are derived from the layout, so they belong to the
+    // variant that produced them. The review anchor caches need no clearing:
+    // they are keyed on the layout object itself, and selecting another
+    // variant hands them a different one.
     this._bookmarkPages = null;
-    this._commentAnchorRanges = null;
-    this._revisionAnchorRanges = null;
-    this._reviewTextRunSourceIndex = null;
   }
 
   /** Lazily build (and cache) the `bookmarkName → page index` map from either
