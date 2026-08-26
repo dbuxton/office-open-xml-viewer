@@ -386,6 +386,28 @@ export class FakeDocxEngine {
   setPageCount(pageCount: number): void {
     this._pageCount = pageCount;
   }
+  /** Progressive layout as an APPLICATION sees it: `load({ progressiveLayout })`
+   *  resolves on the opening pages, so a caller that owns the document can hand
+   *  `fromDocument` a prefix that is still growing. */
+  layoutComplete = true;
+  private _layoutSettled: (() => void) | null = null;
+  private _layoutCompletion: Promise<void> | null = null;
+  beginProgressiveLayout(): void {
+    this.layoutComplete = false;
+    this._layoutCompletion = new Promise<void>((resolve) => {
+      this._layoutSettled = resolve;
+    });
+  }
+  /** The authoritative layout landing behind the viewer's back. */
+  completeLayout(pageCount: number): void {
+    this.setPageCount(pageCount);
+    this.layoutComplete = true;
+    this._layoutSettled?.();
+    this._layoutSettled = null;
+  }
+  async whenLayoutComplete(): Promise<void> {
+    await this._layoutCompletion;
+  }
   /** Recorded {@link setLayoutView} calls — the viewer must move the document's
    *  active layout variant when its tracked-changes view toggles, BEFORE it
    *  reads any geometry from the new variant. */

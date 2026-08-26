@@ -72,6 +72,15 @@ export interface DocxCommentsOptions extends ViewerCommentsOptions {
   readonly markers?: boolean;
   /** Draw anchor-to-card connectors with the requested geometry. Default none. */
   readonly connectors?: ViewerCommentConnectorOptions;
+  /**
+   * Floor for the zoom the built-in comment chrome (cards, markers) is drawn
+   * at. Cards are UI chrome rather than document content, so tying them to the
+   * document zoom makes them unreadable exactly when a zoomed-out overview is
+   * what the reader wants. Default 1 — natural size, never smaller. Zooming IN
+   * still scales the chrome with the page. Pass 0 to tie the chrome to the
+   * document zoom in both directions.
+   */
+  readonly minZoom?: number;
 }
 
 function commentThreads(comments: readonly DocComment[], includeResolved: boolean): CommentThread[] {

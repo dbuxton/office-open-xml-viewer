@@ -578,7 +578,10 @@ describe('DocxScrollViewer — opt-in comment cards', () => {
     const viewer = DocxScrollViewer.fromDocument(
       container as unknown as HTMLElement,
       engine.asDoc(),
-      { comments: { connectors: {} } },
+      // `minZoom: 0` keeps the chrome tied to the document zoom in BOTH
+      // directions, which is what this case is about: the preview transform has
+      // to track the page exactly. The default floor is covered below.
+      { comments: { connectors: {}, minZoom: 0 } },
     );
     await vi.waitFor(() => expect(engine.renderCalls).toHaveLength(1));
     await waitForBuiltInCommentUi(viewer);
@@ -631,6 +634,48 @@ describe('DocxScrollViewer — opt-in comment cards', () => {
       expect(margin.style.visibility).toBe('');
       expect(decoration.style.visibility).toBe('');
     });
+    viewer.destroy();
+  });
+
+  it('draws the comment margin at natural size when the page is zoomed out', async () => {
+    // Cards are chrome, not content. Tying them to the document zoom made them
+    // unreadable exactly when a zoomed-out overview is what the reader wants.
+    installDom();
+    const engine = new FakeDocxEngine(1, [{ widthPt: 612, heightPt: 792 }]);
+    const source = { story: 'body', storyInstance: 'body', path: [0] } as const;
+    engine.comments = [{ id: '8', author: 'Ada', text: 'Review this' }];
+    engine.commentAnchors = [{
+      commentId: '8', source, startRunIndex: 0, endRunIndex: 1,
+      reference: { source, runIndex: 1, affinity: 'preceding' },
+    }] as CommentAnchorRange[];
+    engine.feedTextRuns = [{
+      text: 'anchored', source, sourceRunIndex: 0,
+      x: 20, y: 30, w: 80, h: 14, fontSize: 12, font: '12px sans-serif',
+    }];
+    const container = makeContainer();
+    const viewer = DocxScrollViewer.fromDocument(
+      container as unknown as HTMLElement,
+      engine.asDoc(),
+      { comments: true },
+    );
+    await vi.waitFor(() => expect(engine.renderCalls).toHaveLength(1));
+    await waitForBuiltInCommentUi(viewer);
+
+    const scrollHost = container.children[0]!.children[0]!;
+    const page = scrollHost.children.find((child) => child !== scrollHost.children[0])!;
+    const margin = page.children.find((child) => child.style.cssText.includes('overflow-y:auto'))!;
+    const item = margin.children[0]!;
+
+    viewer.setScale(0.4);
+    expect(viewer.getScale()).toBeCloseTo(0.4);
+    // 280 logical px, undivided by the page's 0.4.
+    expect(parseFloat(margin.style.width)).toBeCloseTo(280);
+    expect(item.style.transform).toBe('scale(1)');
+
+    // Zooming past the floor hands the chrome back to the document zoom.
+    viewer.setScale(1.75);
+    expect(parseFloat(margin.style.width)).toBeCloseTo(280 * 1.75);
+    expect(item.style.transform).toBe('scale(1.75)');
     viewer.destroy();
   });
 

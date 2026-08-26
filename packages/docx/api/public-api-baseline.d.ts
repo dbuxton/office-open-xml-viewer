@@ -1086,6 +1086,7 @@ export interface DocxCommentsOptions extends ViewerCommentsOptions {
     readonly side?: 'auto' | 'left' | 'right';
     readonly markers?: boolean;
     readonly connectors?: ViewerCommentConnectorOptions;
+    readonly minZoom?: number;
 }
 export class DocxDocument {
     static load(source: string | ArrayBuffer, opts?: LoadOptions): Promise<DocxDocument>;

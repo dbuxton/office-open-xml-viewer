@@ -61,6 +61,9 @@ const ZOOM_SETTLE_MS = 150;
  */
 const DEFAULT_PAGE_SHADOW = '0 1px 3px rgba(0,0,0,0.2)';
 const COMMENT_MARGIN_GAP_PX = 12;
+/** Chrome never renders below natural size, however far the page is zoomed out.
+ *  Overridable per viewer via `DocxCommentsOptions.minZoom`. */
+const DEFAULT_COMMENT_MIN_ZOOM = 1;
 const COMMENT_MARGIN_FONT_SIZE_PX = 13;
 const borrowedDocumentOption = Symbol('DocxScrollViewer.borrowedDocument');
 type DocxCommentUiRuntime = typeof import('./comment-ui-runtime.js');
@@ -573,6 +576,30 @@ export class DocxScrollViewer implements ZoomableViewer {
       // window immediately. relayout() is idempotent and defers under a
       // zero-width container (the resize path re-runs it once width appears).
       this.relayout();
+      // "Already loaded" is not the same as "fully laid out". `DocxDocument.
+      // load({ progressiveLayout })` RESOLVES on the document's opening pages,
+      // so an application that owns its document — the composition
+      // fromDocument exists for — hands us a provisional prefix that is still
+      // growing behind us. The load-time publication callbacks belong to that
+      // application, so without this the viewer never learns the authoritative
+      // layout replaced the prefix: the page count, the painted pages, and the
+      // comment anchors projected from the prefix would all stay on screen for
+      // the rest of the session.
+      //
+      // Only completion is observable from here. An application that wants the
+      // intermediate publications on screen as they land should call
+      // `relayout()` from its own `onLayoutPartial`.
+      if (borrowedDocument?.layoutComplete === false) {
+        void Promise.resolve(borrowedDocument.whenLayoutComplete?.()).then(
+          () => {
+            if (this._destroyed || this._doc !== borrowedDocument) return;
+            this._onLayoutPublication(false);
+          },
+          // A background layout failure is the owning application's to report;
+          // surfacing it twice is worse than surfacing it once.
+          () => undefined,
+        );
+      }
     }
   }
 
@@ -754,17 +781,25 @@ export class DocxScrollViewer implements ZoomableViewer {
     const { left, right } = this._padH();
     const available = cw - left - right;
     if (available <= 0) return 0;
-    // Cards and the page share the same absolute zoom. Fit the composite
-    // analytically instead of subtracting a margin measured at the previous
-    // scale; the latter creates a ResizeObserver feedback loop and can inflate
-    // the cards after successive re-fits.
+    // Cards and the page share one absolute zoom while the page is at or above
+    // the chrome floor. Fit that composite analytically instead of subtracting a
+    // margin measured at the previous scale; the latter creates a ResizeObserver
+    // feedback loop and can inflate the cards after successive re-fits.
     const naturalPageWidth = this._doc?.pageSize(0).widthPt
       ? this._doc.pageSize(0).widthPt * PT_TO_PX
       : 0;
-    const fit = this._hasCommentMargin() && naturalPageWidth > 0
-      ? available * naturalPageWidth /
-        (naturalPageWidth + COMMENT_MARGIN_GAP_PX + READ_ONLY_COMMENT_MARGIN_WIDTH_PX)
-      : available;
+    if (!this._hasCommentMargin() || naturalPageWidth <= 0) {
+      return available > 0 ? available : 0;
+    }
+    const marginWidth = COMMENT_MARGIN_GAP_PX + READ_ONLY_COMMENT_MARGIN_WIDTH_PX;
+    const shared = available * naturalPageWidth / (naturalPageWidth + marginWidth);
+    // Below the floor the chrome stops shrinking with the page, so the margin
+    // costs a FIXED width and the page is fitted against what is left. Still
+    // one closed form — nothing is measured from the previous scale.
+    const minZoom = this._commentMinZoom();
+    const fit = shared / naturalPageWidth >= minZoom
+      ? shared
+      : available - marginWidth * minZoom;
     return fit > 0 ? fit : 0; // gutters ≥ container ⇒ defer (same as zero-width)
   }
 
@@ -797,9 +832,22 @@ export class DocxScrollViewer implements ZoomableViewer {
       : 0;
   }
 
-  /** Comment chrome uses the same absolute zoom as the rendered document. */
+  /** The zoom the built-in comment chrome is drawn at. It follows the document
+   *  zoom upward but never below {@link DocxCommentsOptions.minZoom}: cards are
+   *  chrome, not content, and a reader who zooms out to see the shape of a
+   *  document still has to be able to read the comments beside it. */
   private _commentZoom(): number {
-    return this._scaleEstablished ? this._scale : 1;
+    return this._commentZoomFor(this._scaleEstablished ? this._scale : 1);
+  }
+
+  private _commentZoomFor(scale: number): number {
+    return Math.max(scale, this._commentMinZoom());
+  }
+
+  private _commentMinZoom(): number {
+    const requested = this._commentsOptions()?.minZoom;
+    if (requested === undefined) return DEFAULT_COMMENT_MIN_ZOOM;
+    return Number.isFinite(requested) && requested > 0 ? requested : 0;
   }
 
   private _commentsEnabled(): boolean {
@@ -1849,10 +1897,15 @@ export class DocxScrollViewer implements ZoomableViewer {
         slot.textLayer.style.transformOrigin = '0 0';
         slot.textLayer.style.transform = `scale(${ratio})`;
       }
-      if (slot.commentMargin) this._commentUi?.previewReadOnlyCommentMargin(slot.commentMargin, ratio);
+      // The chrome has its own floored zoom, so its preview ratio is not the
+      // page's: between two scales below the floor it does not move at all.
+      const commentRatio = this._commentZoom() / this._commentZoomFor(slot.renderedScale);
+      if (slot.commentMargin) {
+        this._commentUi?.previewReadOnlyCommentMargin(slot.commentMargin, commentRatio);
+      }
       for (const marker of slot.commentTintLayer?.children ?? []) {
         if ((marker as HTMLElement).dataset.ooxmlCommentMarker === undefined) continue;
-        (marker as HTMLElement).style.transform = `translate(-50%,-50%) scale(${ratio})`;
+        (marker as HTMLElement).style.transform = `translate(-50%,-50%) scale(${commentRatio})`;
       }
       if (slot.commentTintLayer) slot.commentTintLayer.style.visibility = '';
       if (slot.commentMargin) slot.commentMargin.style.visibility = '';

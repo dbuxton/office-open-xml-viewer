@@ -319,3 +319,75 @@ describe('DocxScrollViewer — comment navigation across a publication', () => {
     viewer.destroy();
   });
 });
+
+describe('DocxScrollViewer — a borrowed document that is still laying out', () => {
+  it('re-scans comment pages when the authoritative layout lands', async () => {
+    // `load({ progressiveLayout })` resolves on the opening pages, so an
+    // application that owns its DocxDocument — the composition `fromDocument`
+    // exists for — hands the viewer a PREFIX. Nothing else tells the viewer the
+    // authoritative layout replaced it, so the prefix's page count and its
+    // prefix-era comment index stayed on screen for good.
+    installDom();
+    const engine = commentedEngine(2);
+    engine.beginProgressiveLayout();
+    engine.collectPageRuns = vi.fn(async (page: number) => (
+      page === 1 ? [anchoredRun()] : []));
+    const viewer = DocxScrollViewer.fromDocument(
+      makeContainer() as unknown as HTMLElement,
+      engine.asDoc(),
+    );
+
+    expect(viewer.layoutComplete).toBe(false);
+    await expect(viewer.goToComment('c')).resolves.toBe(true);
+    expect(viewer.getSelectionContext()).toMatchObject({ commentId: 'c', pageIndex: 1 });
+
+    engine.collectPageRuns = vi.fn(async (page: number) => (
+      page === 41 ? [anchoredRun()] : []));
+    engine.completeLayout(60);
+    await engine.whenLayoutComplete();
+    await Promise.resolve();
+
+    expect(viewer.pageCount).toBe(60);
+    await expect(viewer.goToComment('c')).resolves.toBe(true);
+    expect(viewer.getSelectionContext()).toMatchObject({ commentId: 'c', pageIndex: 41 });
+    viewer.destroy();
+  });
+});
+
+describe('DocxScrollViewer — comment chrome stays legible when zoomed out', () => {
+  function zoomOf(viewer: ReturnType<typeof DocxScrollViewer.fromDocument>): number {
+    return (viewer as unknown as { _commentZoom(): number })._commentZoom();
+  }
+
+  it('floors the comment zoom so cards do not shrink with the page', () => {
+    installDom();
+    const engine = commentedEngine(4);
+    const viewer = DocxScrollViewer.fromDocument(
+      makeContainer(700, 500) as unknown as HTMLElement,
+      engine.asDoc(),
+      { comments: true },
+    );
+
+    viewer.setScale(0.35);
+    // The page is at 0.35; the cards are chrome, not content, and stay readable.
+    expect(zoomOf(viewer)).toBe(1);
+    // Zooming IN still scales them with the document.
+    viewer.setScale(2);
+    expect(zoomOf(viewer)).toBe(2);
+    viewer.destroy();
+  });
+
+  it('lets an application tie the chrome back to the document zoom', () => {
+    installDom();
+    const engine = commentedEngine(4);
+    const viewer = DocxScrollViewer.fromDocument(
+      makeContainer(700, 500) as unknown as HTMLElement,
+      engine.asDoc(),
+      { comments: { minZoom: 0 } },
+    );
+
+    viewer.setScale(0.35);
+    expect(zoomOf(viewer)).toBeCloseTo(0.35, 5);
+    viewer.destroy();
+  });
+});
