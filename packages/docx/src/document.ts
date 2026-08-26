@@ -807,6 +807,11 @@ export class DocxDocument {
     // `review` rides on the first publication only; later ones keep what the
     // first established.
     const review = partial.review ?? this._meta;
+    // The anchor projections DO ride on every publication: they are derived
+    // from the prefix, so they genuinely change as it grows. Carrying the
+    // previous ones forward is only a fallback for a document with no review
+    // data, where the worker sends none at all.
+    const anchors = partial.reviewAnchors ?? this._meta;
     this._meta = {
       pageCount: partial.pageCount,
       pageSizes: partial.pageSizes,
@@ -815,9 +820,18 @@ export class DocxDocument {
       comments: review?.comments ?? [],
       footnotes: review?.footnotes ?? [],
       endnotes: review?.endnotes ?? [],
-      // The two anchor projections are whole-document joins; only the
-      // authoritative `parsedMeta` carries them. Absent is a shape
-      // `DocumentMeta` already documents as supported.
+      // Projected against the TRUNCATED prefix, so an anchor past its cut
+      // resolves onto no page rather than borrowing a position inside it. This
+      // is what lets a host reserve its comment margin from the first paint and
+      // reveal each comment with its own page, as main mode does, instead of
+      // showing nothing until `parsedMeta` and re-fitting around a gutter that
+      // suddenly exists.
+      ...(anchors?.commentAnchorRanges === undefined
+        ? {}
+        : { commentAnchorRanges: anchors.commentAnchorRanges }),
+      ...(anchors?.revisionAnchorRanges === undefined
+        ? {}
+        : { revisionAnchorRanges: anchors.revisionAnchorRanges }),
     };
     if (partial.review) {
       this._review = snapshotReviewData(partial.review.comments, partial.review.revisions);

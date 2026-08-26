@@ -309,7 +309,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
             lastProgressMs = now;
             post({ type: 'layoutProgress', forId: id, committedPages });
           },
-        }, layoutOptions, abort.signal);
+        }, layoutOptions, abort.signal, {
+          comments: model.comments ?? [],
+          revisions: model.revisions ?? [],
+        });
         if (layoutAbort === abort) layoutAbort = null;
       }
       // Usually a cache hit: the progressive drive above primed this exact

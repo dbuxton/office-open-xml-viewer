@@ -38,7 +38,11 @@
  * would be discarded AND a second full layout built.
  */
 import { buildBookmarkPageMap } from './bookmark-nav.js';
+import { collectLayoutSourceCommentRangesIfPresent } from './comments.js';
 import { layoutDocumentProgressively } from './layout/progressive.js';
+import { textRunSourceIndexForDocument } from './layout/text-index.js';
+import { collectLayoutSourceRevisionRangesIfPresent } from './revisions.js';
+import type { DocComment, DocRevision } from './types.js';
 import type { DeepReadonly, DocumentLayout } from './layout/types.js';
 import type { LayoutOptions } from './layout/options.js';
 import type { LayoutSourceStore } from './layout/layout-source-store.js';
@@ -50,6 +54,14 @@ import type { DocumentLayoutPartial } from './worker-protocol.js';
  *  {@link DocumentLayoutPartial} minus the review payload, which the caller
  *  attaches to the first publication only. */
 export type RenderWorkerLayoutPublication = Omit<DocumentLayoutPartial, 'review'>;
+
+/** The model-derived review records a publication's anchors are projected from.
+ *  Supplied by the caller because this module never parses; empty arrays mean
+ *  "nothing to project" and skip the join entirely. */
+export interface RenderWorkerReviewData {
+  readonly comments: readonly Readonly<DocComment>[];
+  readonly revisions: readonly Readonly<DocRevision>[];
+}
 
 /** How a publication and its progress reach the outside world. Injected rather
  *  than imported so this module never touches `self` or the wire, which is what
@@ -69,6 +81,8 @@ export interface RenderWorkerLayoutPublisher {
 function publicationOf(
   layout: DocumentLayout | DeepReadonly<DocumentLayout>,
   exact: boolean,
+  source: LayoutSourceStore,
+  review: RenderWorkerReviewData | undefined,
 ): RenderWorkerLayoutPublication {
   return {
     pageCount: layout.pages.length,
@@ -78,6 +92,39 @@ function publicationOf(
     })),
     bookmarkPages: [...buildBookmarkPageMap(layout)],
     exact,
+    ...(reviewAnchorsOf(layout, source, review) ?? {}),
+  };
+}
+
+/** Project this prefix's review anchors, or nothing when the document has no
+ *  review data — the common case, which must not pay for a text-run index.
+ *
+ *  `truncated: true` is the whole point: the prefix stops projecting text at
+ *  its pagination cut, which is NOT the same fact as "this content has no
+ *  final-state geometry". Without it every not-yet-paginated comment would
+ *  anchor to the nearest run inside the prefix — beside the opening pages. */
+function reviewAnchorsOf(
+  layout: DocumentLayout | DeepReadonly<DocumentLayout>,
+  source: LayoutSourceStore,
+  review: RenderWorkerReviewData | undefined,
+): Pick<RenderWorkerLayoutPublication, 'reviewAnchors'> | undefined {
+  if (!review || (review.comments.length === 0 && review.revisions.length === 0)) return undefined;
+  const renderedRunIndex = textRunSourceIndexForDocument(layout as DocumentLayout);
+  return {
+    reviewAnchors: {
+      commentAnchorRanges: collectLayoutSourceCommentRangesIfPresent(
+        review.comments,
+        source,
+        renderedRunIndex,
+        { truncated: true },
+      ),
+      revisionAnchorRanges: collectLayoutSourceRevisionRangesIfPresent(
+        review.revisions,
+        source,
+        renderedRunIndex,
+        { truncated: true },
+      ),
+    },
   };
 }
 
@@ -104,6 +151,7 @@ export async function paginateRenderWorkerDocumentProgressively(
   publisher: RenderWorkerLayoutPublisher,
   layoutOptions: LayoutOptions,
   signal?: AbortSignal,
+  review?: RenderWorkerReviewData,
 ): Promise<void> {
   const store = doc.layoutVariants;
   let published = false;
@@ -120,7 +168,7 @@ export async function paginateRenderWorkerDocumentProgressively(
         // is the one layout a later pass is allowed to supersede.
         store.prime(layoutOptions, preview.layout, published);
         published = true;
-        publisher.publish(publicationOf(preview.layout, preview.exact));
+        publisher.publish(publicationOf(preview.layout, preview.exact, source, review));
       },
     },
   );

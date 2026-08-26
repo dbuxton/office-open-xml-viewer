@@ -73,6 +73,20 @@ export interface DocumentLayoutPartial {
    *  bandwidth on a heavily reviewed document. The host seeds its metadata from
    *  this and keeps it across later publications. */
   review?: Pick<DocumentMeta, 'revisions' | 'comments' | 'footnotes' | 'endnotes'>;
+  /** §17.13.4 / §17.13.5 anchor projections for THIS publication's prefix,
+   *  sent with every publication rather than only the first.
+   *
+   *  Unlike `review` above these are layout-derived, so they genuinely change
+   *  as the prefix grows and cannot be seeded once. Projecting them per
+   *  publication is what lets a host reserve its comment margin from the first
+   *  paint and reveal each comment with its own page — the behaviour main mode
+   *  has — instead of showing nothing until `parsedMeta` and then re-fitting
+   *  the page around a gutter that suddenly exists. They are projected against
+   *  a TRUNCATED layout, so an anchor past the prefix's cut carries no
+   *  geometry fallback and resolves onto no page at all rather than borrowing a
+   *  position inside the prefix. Absent when the document has neither comments
+   *  nor revisions. */
+  reviewAnchors?: Pick<DocumentMeta, 'commentAnchorRanges' | 'revisionAnchorRanges'>;
 }
 
 /** Serializable subset of RenderPageOptions (callbacks cannot cross the wire). */

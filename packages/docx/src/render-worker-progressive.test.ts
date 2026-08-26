@@ -38,15 +38,20 @@ const DEFAULT_CURRENT_DATE_MS = 1_700_000_000_000;
 const DEFAULT_VIEW = layoutOptionsForRender({ defaultCurrentDateMs: DEFAULT_CURRENT_DATE_MS });
 const MARKUP_VIEW = normalizeLayoutOptions(undefined, DEFAULT_CURRENT_DATE_MS, true);
 
-function retain(shape: SyntheticDocumentShape, paragraphs: number) {
-  const source = layoutSourceStore(syntheticDocxModel(shape, { paragraphs }));
+function retain(
+  shape: SyntheticDocumentShape,
+  paragraphs: number,
+  options: { commentedParagraphIndices?: readonly number[] } = {},
+) {
+  const model = syntheticDocxModel(shape, { paragraphs, ...options });
+  const source = layoutSourceStore(model);
   const services = createLayoutServices(source);
   const retained = retainRenderWorkerDocumentLayout(
     source,
     services,
     DEFAULT_CURRENT_DATE_MS,
   );
-  return { source, services, retained };
+  return { model, source, services, retained };
 }
 
 /** Collect publications while recording what the store served at the instant
@@ -78,6 +83,39 @@ afterAll(() => {
 });
 
 describe('render worker progressive layout', () => {
+  it('projects review anchors from each published prefix', async () => {
+    // Main mode publishes anchors for every comment from the first prefix, with
+    // no cross-cut geometry fallback, so the comment margin is reserved from
+    // the first paint and each comment appears with its own page. Worker mode
+    // sent no anchors at all until the authoritative metadata landed, so the
+    // gutter popped in — and the page re-fitted — partway through the load.
+    const COMMENTED = 280;
+    const { model, source, retained } = retain('plain', 300, {
+      commentedParagraphIndices: [COMMENTED],
+    });
+    const store = retained.layoutVariants;
+    const recorder = recordingPublisher(() => store.defaultLayout.pages.length);
+
+    await paginateRenderWorkerDocumentProgressively(
+      retained,
+      source,
+      recorder.publisher,
+      DEFAULT_VIEW,
+      undefined,
+      { comments: model.comments ?? [], revisions: model.revisions ?? [] },
+    );
+
+    expect(recorder.publications.length).toBeGreaterThan(0);
+    for (const publication of recorder.publications) {
+      const anchors = publication.reviewAnchors?.commentAnchorRanges ?? [];
+      // Every comment is represented, so a host can reserve its margin.
+      expect(anchors.map(({ commentId }) => commentId)).toEqual([String(COMMENTED)]);
+      // …and none of them borrows geometry from inside the prefix, which is
+      // what put every comment beside page 1.
+      expect(anchors[0]?.geometryFallback).toBeUndefined();
+    }
+  }, 300_000);
+
   it('primes each prefix before announcing it, and ends on the blocking layout', async () => {
     const { source, retained } = retain('plain', 300);
     const store = retained.layoutVariants;

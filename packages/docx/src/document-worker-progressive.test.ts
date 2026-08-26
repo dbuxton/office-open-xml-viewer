@@ -318,6 +318,53 @@ describe('worker-mode progressive load', () => {
   });
 });
 
+describe('worker publications carry their prefix\'s review anchors', () => {
+  it('answers commentAnchorRanges from the publication, then from parsedMeta', async () => {
+    // Main mode publishes anchors for every comment from the first prefix, so a
+    // viewer reserves its comment margin on the first paint. Worker mode had
+    // none until `parsedMeta`, which meant no margin at all during the load and
+    // a page re-fit when the gutter finally appeared.
+    const harness = progressiveDocument();
+    const source = { story: 'body', storyInstance: 'body', path: [7] } as const;
+    const prefixAnchors = [{
+      commentId: '1', source, startRunIndex: 0, endRunIndex: 1,
+      reference: { source, runIndex: 1, affinity: 'preceding' as const },
+    }];
+
+    harness.push({
+      type: 'layoutPartial',
+      forId: 11,
+      partial: partial(2, { review: REVIEW, reviewAnchors: {
+        commentAnchorRanges: prefixAnchors,
+        revisionAnchorRanges: [],
+      } }),
+    } as unknown as RenderWorkerResponse);
+
+    expect(harness.document.commentAnchorRanges().map(({ commentId }) => commentId))
+      .toEqual(['1']);
+    expect(harness.document.layoutComplete).toBe(false);
+
+    // A later publication re-projects against its own, longer prefix.
+    const grown = [{ ...prefixAnchors[0]!, startRunIndex: 0, endRunIndex: 2 }];
+    harness.push({
+      type: 'layoutPartial',
+      forId: 11,
+      partial: partial(6, { reviewAnchors: {
+        commentAnchorRanges: grown,
+        revisionAnchorRanges: [],
+      } }),
+    } as unknown as RenderWorkerResponse);
+    expect(harness.document.commentAnchorRanges()[0]?.endRunIndex).toBe(2);
+
+    harness.settle({ type: 'parsedMeta', id: 11, meta: fullMeta(40) });
+    await harness.document.whenLayoutComplete();
+
+    // The authoritative projection replaces the prefix's once it lands.
+    expect(harness.document.commentAnchorRanges()).toEqual([]);
+    expect(harness.document.layoutComplete).toBe(true);
+  });
+});
+
 describe('progressive pushes and request correlation', () => {
   /** In-memory worker whose replies the test drives directly. */
   class ScriptedWorker implements WorkerLike {
