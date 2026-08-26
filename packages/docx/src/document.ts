@@ -845,9 +845,13 @@ export class DocxDocument {
    *  time, but it may not go quiet: treat silence as a wedged worker. */
   private _onParseWentSilent(): void {
     const progressive = this._progressive;
+    // Read the deadline BEFORE clearing it: `_clearParseWatchdog` drops
+    // `_parseWatchdogMs`, and interpolating it afterwards reported the timeout
+    // this message exists to name as `undefinedms`.
+    const timeoutMs = this._parseWatchdogMs;
     this._clearParseWatchdog();
     const error = new Error(
-      `worker layout produced no progress for ${this._parseWatchdogMs}ms`,
+      `worker layout produced no progress for ${timeoutMs}ms`,
     );
     if (progressive && !progressive.published) {
       // load() has not resolved yet, so this can still be its rejection.

@@ -308,9 +308,13 @@ describe('worker-mode progressive load', () => {
       }
       expect(harness.terminated()).toBe(false);
 
-      // Going quiet is what is not allowed.
+      // Going quiet is what is not allowed. The message must name the deadline
+      // it actually enforced — a diagnostic that reads `undefinedms` tells an
+      // integrator nothing about which timeout to raise.
       vi.advanceTimersByTime(1_001);
-      await expect(harness.parsed).rejects.toThrow(/no progress/);
+      await expect(harness.parsed).rejects.toThrow(
+        'worker layout produced no progress for 1000ms',
+      );
       expect(harness.terminated()).toBe(true);
     } finally {
       vi.useRealTimers();
