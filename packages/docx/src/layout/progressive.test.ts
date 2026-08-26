@@ -205,6 +205,35 @@ describe('preview pages match the final layout', () => {
     for (const preview of previews) expect(preview.exact).toBe(false);
   }, 300_000);
 
+  it('releases the thread while laying out the opening preview', async () => {
+    // The preview IS the wait to first paint. Built in one blocking call it
+    // froze a main-mode UI for the whole stretch and starved the worker
+    // watchdog of progress heartbeats; drained through the scheduler it must
+    // release the thread before the first publication, not only after it.
+    const testCase = open('plain', 400);
+    let yieldsBeforeFirstPreview = -1;
+    let yields = 0;
+    await layoutDocumentProgressively(
+      testCase.source.bodyLayoutInput,
+      testCase.services,
+      testCase.options,
+      {
+        hasPaginationFields: testCase.source.hasPaginationFields,
+        onPreview: () => {
+          if (yieldsBeforeFirstPreview < 0) yieldsBeforeFirstPreview = yields;
+        },
+        scheduler: {
+          // Force a release at every suspension point so the count is about
+          // structure, not about how fast this machine lays out 12 entries.
+          now: () => Number.MAX_SAFE_INTEGER,
+          sliceMs: 0,
+          yieldToHost: () => { yields += 1; return Promise.resolve(); },
+        },
+      },
+    );
+    expect(yieldsBeforeFirstPreview).toBeGreaterThan(0);
+  }, 300_000);
+
   it('stops the chain when the drain is aborted', async () => {
     // Destroying the viewer mid-load must stop the work, not merely ignore it:
     // the remaining pagination would otherwise keep consuming main-thread

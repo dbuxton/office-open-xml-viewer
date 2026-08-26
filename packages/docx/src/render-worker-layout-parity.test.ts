@@ -545,6 +545,30 @@ describe('render worker canonical layout parity', () => {
     const runsCollected = {
       type: 'runsCollected', id: 3, runs: [],
     } satisfies RenderWorkerResponse;
+    const progressiveParse = {
+      type: 'parse', id: 5, data: new ArrayBuffer(0), useGoogleFonts: false,
+      resourcePolicy: DEFAULT_OOXML_RESOURCE_LIMITS,
+      defaultCurrentDateMs: 10,
+      currentDateMs: 20,
+      showTrackedChanges: true,
+      progressiveLayout: true,
+    } satisfies RenderWorkerRequest;
+    // Uncorrelated pushes: `forId`, never `id`. The bridge resolves a pending
+    // request on the first response `correlate` matches, so an `id` here would
+    // settle the parse before the authoritative metadata exists.
+    const layoutPartial = {
+      type: 'layoutPartial', forId: 5,
+      partial: {
+        pageCount: 2,
+        pageSizes: [{ widthPt: 595, heightPt: 842 }, { widthPt: 595, heightPt: 842 }],
+        bookmarkPages: [],
+        exact: false,
+        review: { revisions: [], comments: [], footnotes: [], endnotes: [] },
+      },
+    } satisfies RenderWorkerResponse;
+    const layoutProgress = {
+      type: 'layoutProgress', forId: 5, committedPages: 12,
+    } satisfies RenderWorkerResponse;
     const error = {
       type: 'error', id: 4, message: 'unsupported transition',
       errorName: 'UnsupportedPageFlowTransitionError',
@@ -566,6 +590,18 @@ describe('render worker canonical layout parity', () => {
     ]);
     expect(Object.keys(pageRendered).sort()).toEqual(['bitmap', 'id', 'runs', 'type']);
     expect(Object.keys(runsCollected).sort()).toEqual(['id', 'runs', 'type']);
+    expect(Object.keys(progressiveParse).sort()).toEqual([
+      'currentDateMs', 'data', 'defaultCurrentDateMs', 'id', 'progressiveLayout',
+      'resourcePolicy', 'showTrackedChanges', 'type', 'useGoogleFonts',
+    ]);
+    expect(Object.keys(layoutPartial).sort()).toEqual(['forId', 'partial', 'type']);
+    expect(Object.keys(layoutPartial.partial).sort()).toEqual([
+      'bookmarkPages', 'exact', 'pageCount', 'pageSizes', 'review',
+    ]);
+    expect(Object.keys(layoutProgress).sort()).toEqual(['committedPages', 'forId', 'type']);
+    // The push arms must not be correlatable, or they would settle the parse.
+    expect('id' in layoutPartial).toBe(false);
+    expect('id' in layoutProgress).toBe(false);
     expect(Object.keys(error).sort()).toEqual([
       'code',
       'errorName',

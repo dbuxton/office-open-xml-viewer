@@ -40,6 +40,7 @@ import { loadDocxLocalFontMetrics } from './local-font-metrics';
 import type {
   RenderWorkerResponse,
   RenderWorkerWireRequest,
+  DocumentLayoutPartial,
   DocumentMeta,
 } from './worker-protocol';
 import { layoutSourceModelAdapterFromOwnedModel } from './layout-source-model-adapter.js';
@@ -48,6 +49,9 @@ import {
   retainRenderWorkerDocumentLayout,
   type RetainedRenderWorkerDocumentLayout,
 } from './render-worker-layout.js';
+import { paginateRenderWorkerDocumentProgressively } from './render-worker-progressive.js';
+import { PaginationAbortError } from './layout/pagination-scheduler.js';
+import { normalizeLayoutOptions } from './layout/options.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
 import { textRunSourceIndexForDocument } from './layout/text-index.js';
 import { hitTestSelectedDocxElementContext } from './element-context.js';
@@ -80,6 +84,15 @@ const documentPull = new DocumentPullWorker(
 let documentGeneration = 0;
 let fallbackPull: DocumentPullWorker | null = null;
 let doc: RetainedRenderWorkerDocumentLayout | null = null;
+/** Cancels a still-running progressive drain when a new `parse` supersedes it.
+ *  The host's `destroy()` terminates the worker outright, so this covers only
+ *  the re-parse path — where the worker survives and would otherwise keep
+ *  paginating a document nobody is holding any more. */
+let layoutAbort: AbortController | null = null;
+/** Floor between `layoutProgress` posts. `onProgress` fires at EVERY pagination
+ *  suspension point; forwarding each one would flood the wire with messages the
+ *  host can only render one of per frame. */
+const LAYOUT_PROGRESS_POST_INTERVAL_MS = 100;
 let renderers: LoadedWorkerRenderers = {};
 let localMetricFontFaces: FontFace[] = [];
 const rawParts = new BoundedRawPartCache({
@@ -137,6 +150,8 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       host.run(() => retained.assert_healthy());
     }
     if (req.type === 'parse') {
+      layoutAbort?.abort();
+      layoutAbort = null;
       await documentPull.reset();
       await fallbackPull?.reset();
       fallbackPull = null;
@@ -246,7 +261,62 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
         layoutServices,
         req.defaultCurrentDateMs,
       );
-      const layout = doc.layoutVariants.defaultLayout;
+      // The variant this load will actually be viewed as. Everything below —
+      // the progressive prefix, the authoritative layout, and the metadata the
+      // host's geometry accessors read — is built for THIS view, so a
+      // tracked-changes or explicit-date load no longer reports a page count
+      // belonging to a pagination nobody is going to paint.
+      const layoutOptions = normalizeLayoutOptions(
+        req.currentDateMs,
+        req.defaultCurrentDateMs,
+        req.showTrackedChanges,
+      );
+      // Progressive layout: publish the opening pages long before the whole
+      // document is paginated, so the host can resolve load() and paint while
+      // the rest is still being laid out. Every publication primes the variant
+      // store first, so a `renderPage` for a just-announced page is served from
+      // the same store the authoritative layout will later replace.
+      //
+      // The guard mirrors main mode's `deferrable`: a fatally-unparseable
+      // document is served a synthetic error page by the variant store's
+      // builder, and neither previewing nor slicing may route around that.
+      if (req.progressiveLayout && source.fatalParse === null) {
+        // The parsed model is the source of review data, so the first
+        // publication carries it: the host has nothing else to answer
+        // `comments` / `revisions` from until `parsedMeta` arrives, and load()
+        // is about to resolve on that first publication.
+        let review: DocumentLayoutPartial['review'] | undefined = {
+          revisions: model.revisions ?? [],
+          comments: model.comments ?? [],
+          footnotes: model.footnotes ?? [],
+          endnotes: model.endnotes ?? [],
+        };
+        let lastProgressMs = 0;
+        const abort = new AbortController();
+        layoutAbort = abort;
+        await paginateRenderWorkerDocumentProgressively(doc, source, {
+          publish: (publication) => {
+            post({
+              type: 'layoutPartial',
+              forId: id,
+              partial: review ? { ...publication, review } : publication,
+            });
+            review = undefined;
+          },
+          progress: (committedPages) => {
+            const now = Date.now();
+            if (now - lastProgressMs < LAYOUT_PROGRESS_POST_INTERVAL_MS) return;
+            lastProgressMs = now;
+            post({ type: 'layoutProgress', forId: id, committedPages });
+          },
+        }, layoutOptions, abort.signal);
+        if (layoutAbort === abort) layoutAbort = null;
+      }
+      // Usually a cache hit: the progressive drive above primed this exact
+      // variant, so this reads the authoritative layout back rather than
+      // paginating a second time. Without progressive layout it is the
+      // blocking build, as it always was.
+      const layout = doc.layoutVariants.layoutFor(layoutOptions);
       const pageSizes = layout.pages.map((page) => ({
         widthPt: page.geometry.widthPt,
         heightPt: page.geometry.heightPt,
@@ -353,6 +423,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest>) => {
       return;
     }
   } catch (err) {
+    // A superseded progressive drain is not a failure the requester can act on:
+    // the `parse` that aborted it has already moved on, and posting a
+    // correlated error would reject a request nobody is waiting for.
+    if (err instanceof PaginationAbortError) return;
     const error = err instanceof Error ? err : new Error(String(err));
     const details = error as Error & {
       code?: string;

@@ -247,7 +247,9 @@ function production(state, table, para, group) {
       + "import { retainRenderWorkerDocumentLayout } from './render-worker-layout.js';\n"
       + 'export function initializeWorker(source, layoutServices, req) {\n'
       + '  const doc = retainRenderWorkerDocumentLayout(source, layoutServices, req.defaultCurrentDateMs);\n'
-      + '  const layout = doc.layoutVariants.defaultLayout;\n'
+      + '  const layoutOptions = normalizeLayoutOptions(req.currentDateMs,\n'
+      + '    req.defaultCurrentDateMs, req.showTrackedChanges);\n'
+      + '  const layout = doc.layoutVariants.layoutFor(layoutOptions);\n'
       + '  const pageSizes = layout.pages.map((page) => page.geometry);\n'
       + '  const meta = { pageCount: layout.pages.length,\n'
       + '    pageSizes,\n'
@@ -1889,10 +1891,19 @@ test('worker retention rejects declarations outside its exact ownership seam', (
   expectDiagnostic(root, 'WORKER_LAYOUT_SELECTION', 'extra worker declaration', '--final');
 });
 
-test('worker parse metadata comes from the retained default layout route', () => {
+test('worker parse metadata comes from the retained selected-variant route', () => {
   for (const [name, from, to] of [
-    ['foreign metadata layout', 'doc.layoutVariants.defaultLayout', 'foreignLayout'],
-    ['derived metadata layout', 'doc.layoutVariants.defaultLayout', 'layoutForMetadata(doc)'],
+    ['foreign metadata layout', 'doc.layoutVariants.layoutFor(layoutOptions)', 'foreignLayout'],
+    ['derived metadata layout', 'doc.layoutVariants.layoutFor(layoutOptions)', 'layoutForMetadata(doc)'],
+    // Reporting the DEFAULT variant is the specific regression this pin exists
+    // for: a tracked-changes or explicit-date load paginates differently, so
+    // default-variant metadata describes pages the worker will never paint.
+    ['default metadata layout', 'doc.layoutVariants.layoutFor(layoutOptions)', 'doc.layoutVariants.defaultLayout'],
+    ['foreign metadata variant', 'layoutFor(layoutOptions)', 'layoutFor(foreignOptions)'],
+    // The selected variant must come from the request's own view fields, not a
+    // fabricated one, or the worker paginates a view the host never asked for.
+    ['derived metadata variant', 'normalizeLayoutOptions(req.currentDateMs,', 'normalizeLayoutOptions(Date.now(),'],
+    ['dropped tracked-changes axis', 'req.defaultCurrentDateMs, req.showTrackedChanges)', 'req.defaultCurrentDateMs, false)'],
     ['foreign metadata page count', 'pageCount: layout.pages.length', 'pageCount: foreignLayout.pages.length'],
     ['foreign metadata page sizes', 'const pageSizes = layout.pages.map', 'const pageSizes = foreignLayout.pages.map'],
     ['foreign metadata bookmarks', 'buildBookmarkPageMap(layout)', 'buildBookmarkPageMap(foreignLayout)'],

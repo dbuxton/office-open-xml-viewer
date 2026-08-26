@@ -54,7 +54,7 @@
  * BEFORE that finishes.
  */
 import type { BodyLayoutInput } from './body-layout-input.js';
-import { paginateBody, paginateBodySteps } from './body-paginator.js';
+import { paginateBodySteps } from './body-paginator.js';
 import {
   drainPaginationAsync,
   PaginationAbortError,
@@ -94,7 +94,8 @@ export interface ProgressiveLayoutOptions {
    * Receives each provisional prefix layout, in growing order.
    *
    * Called zero or more times before the returned promise settles. The first
-   * call is the synchronous opening preview a caller can resolve `load()` on;
+   * call is the opening preview a caller can resolve `load()` on — delivered
+   * asynchronously, since the preview is itself laid out in scheduler slices;
    * later calls extend it as the chain progresses. Never called with fewer
    * pages than the previous call.
    */
@@ -175,7 +176,7 @@ export async function layoutDocumentProgressively(
   const total = input.sequence.length;
 
   let covered = onPreview
-    ? emitPreview(input, services, options, previewPages, onPreview)
+    ? await emitPreview(input, services, options, previewPages, onPreview, scheduler)
     : 0;
 
   if (onPreview && covered > 0) {
@@ -218,14 +219,23 @@ export async function layoutDocumentProgressively(
 }
 
 /** Publish the opening pages. Returns the body entries covered, or 0 if no
- *  useful preview could be produced. */
-function emitPreview(
+ *  useful preview could be produced.
+ *
+ *  Drained through the same scheduler as everything after it, for the same
+ *  reason: on the main thread a blocking preview froze the UI for the entire
+ *  wait-to-first-paint (the preview IS that wait), and in a worker it was the
+ *  one stretch that produced no progress heartbeats — precisely the silence the
+ *  host's watchdog treats as a wedged worker. The slices also let a worker
+ *  answer unrelated requests while the opening pages are still being laid
+ *  out. */
+async function emitPreview(
   input: BodyLayoutInput,
   services: LayoutServices,
   options: LayoutOptions,
   previewPages: number,
   onPreview: (preview: ProgressiveLayoutPreview) => void,
-): number {
+  scheduler?: PaginationSchedulerOptions,
+): Promise<number> {
   const total = input.sequence.length;
   let entries = INITIAL_PREVIEW_ENTRIES;
   // A document that fits inside the first preview window is not worth
@@ -236,12 +246,19 @@ function emitPreview(
     if (covered >= total) return 0;
     let layout: DocumentLayout;
     try {
-      layout = paginateBody(truncateBodyInput(input, covered), services, options);
-    } catch {
-      // A prefix is not a document the engine promised to be able to lay out —
-      // a cut can land anywhere, including places the real sequence never
-      // presents. Never let that failure reach the caller: the authoritative
-      // layout is still coming, and losing the preview only costs latency.
+      layout = await drainPaginationAsync(
+        paginateBodySteps(truncateBodyInput(input, covered), services, options),
+        scheduler,
+      );
+    } catch (error) {
+      // An aborted drain means the document is gone; stop rather than keep
+      // laying out for a viewer that no longer exists.
+      if (error instanceof PaginationAbortError) throw error;
+      // Any other failure: a prefix is not a document the engine promised to be
+      // able to lay out — a cut can land anywhere, including places the real
+      // sequence never presents. Never let that failure reach the caller: the
+      // authoritative layout is still coming, and losing the preview only
+      // costs latency.
       return 0;
     }
     // Two pages is the minimum useful result: the trailing one is discarded as

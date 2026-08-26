@@ -128,8 +128,16 @@ export interface DocxScrollViewerOptions extends Omit<RenderPageOptions, 'onText
    * displayed totals settle when layout completes.
    *
    * `pageCount` therefore starts small and grows; {@link findText} waits for the
-   * full layout internally. Ignored by `fromDocument`, whose document is already
-   * loaded. Requires `mode: 'main'`.
+   * full layout internally. Works in both render modes and in either
+   * tracked-changes view; in `mode: 'worker'` it additionally keeps the
+   * remaining pagination off the main thread.
+   *
+   * Ignored by `fromDocument`, which does not load the document — but a
+   * borrowed document may still be laying out, because `DocxDocument.load({
+   * progressiveLayout })` resolves on its opening pages. The Viewer follows
+   * such a document to completion on its own; to reflect the intermediate
+   * publications as they land, call {@link relayout} from the `onLayoutPartial`
+   * you passed to `load()`.
    */
   progressiveLayout?: boolean;
   /**

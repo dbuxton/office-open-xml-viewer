@@ -2336,14 +2336,34 @@ function variableDeclarationsNamed(node, name) {
   return declarations;
 }
 
+/**
+ * The worker's parse metadata must describe the variant the load actually
+ * selected, and exactly one spelling of it.
+ *
+ * `showTrackedChanges` and an explicit `currentDate` each paginate the document
+ * differently, so a metadata route reading the DEFAULT variant would report a
+ * page count and page sizes belonging to a layout nobody is going to paint.
+ * Pinning both the selection (`layoutFor(layoutOptions)`) and the options it is
+ * selected by (normalized from the request's own fields) keeps the reported
+ * geometry, the primed progressive prefix and the painted pages on one key.
+ */
 function workerMetadataRouteIsCanonical(source) {
   const layouts = variableDeclarationsNamed(source, 'layout');
   const pageSizeLists = variableDeclarationsNamed(source, 'pageSizes');
   const metadata = variableDeclarationsNamed(source, 'meta');
+  const viewOptions = variableDeclarationsNamed(source, 'layoutOptions');
   if (layouts.length !== 1
-    || layouts[0].initializer?.getText(source) !== 'doc.layoutVariants.defaultLayout'
+    || layouts[0].initializer?.getText(source) !== 'doc.layoutVariants.layoutFor(layoutOptions)'
+    || viewOptions.length !== 1
     || pageSizeLists.length !== 1
     || metadata.length !== 1) return false;
+  const viewInitializer = viewOptions[0].initializer
+    && unwrapStaticExpression(viewOptions[0].initializer);
+  const viewCall = viewInitializer && callOf(viewInitializer, 'normalizeLayoutOptions');
+  if (!viewCall
+    || viewCall.arguments.length !== 3
+    || viewCall.arguments.map((argument) => argument.getText(source)).join(',')
+      !== 'req.currentDateMs,req.defaultCurrentDateMs,req.showTrackedChanges') return false;
   const pageSizesInitializer = pageSizeLists[0].initializer
     && unwrapStaticExpression(pageSizeLists[0].initializer);
   if (!pageSizesInitializer
